@@ -1,0 +1,36 @@
+[
+  {
+    "app_info": {
+      "app_name": [
+        "acp",
+        "sp",
+        "core"
+      ],
+      "app_url": [
+        "https://activate.dts.dev.cloud01.swift.com/activate/status",
+        "https://signing-proxy.dts.dev.cloud01.swift.com/status",
+        "https://digital-token.dts.dev.cloud01.swift.com/info"
+      ]
+    },
+    "subnet_id": "subnet-0cfebf92b0918a0f3",
+    "canary_name": "appaz1a",
+    "az_name": "eu-central-1a"
+  },
+  {
+    "app_info": {
+      "app_name": [
+        "acp",
+        "sp",
+        "core"
+      ],
+      "app_url": [
+        "https://activate.dts.dev.cloud01.swift.com/activate/status",
+        "https://signing-proxy.dts.dev.cloud01.swift.com/status",
+        "https://digital-token.dts.dev.cloud01.swift.com/info"
+      ]
+    },
+    "subnet_id": "subnet-00151cadadb58dee0",
+    "canary_name": "appaz1b",
+    "az_name": "eu-central-1b"
+  }
+]
