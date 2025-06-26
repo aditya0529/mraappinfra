@@ -246,7 +246,7 @@ class NLBECSFargateEndpointService(Stack):
             cpu=32
         )
 
-        create_ssm_agent_container(self, config, task_definition)
+        create_ssm_agent_container(self, config, task_definition, config['deployment_region_1'])
 
         for _vol in self.ssm_related_vol_config.keys():
             task_definition.add_volume(

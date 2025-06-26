@@ -5,7 +5,7 @@ from aws_cdk import (
     RemovalPolicy
 )
 
-def create_ssm_agent_container(scope, config, task_definition):
+def create_ssm_agent_container(scope, config, task_definition, region):
     ssm_agent_log_group = logs.LogGroup(
         scope,
         "ssm-agent-log-group",
@@ -17,7 +17,7 @@ def create_ssm_agent_container(scope, config, task_definition):
 
     ssm_agent_repository = ecr.Repository.from_repository_arn(
         scope, "ssm-agent-repository",
-        f"arn:aws:ecr:{config['deployment_region_1']}:{config['deployment_sdlc_account']}:repository/{config['ssm_agent_ecr_repo_name']}"
+        f"arn:aws:ecr:{region}:{config['deployment_sdlc_account']}:repository/{config['ssm_agent_ecr_repo_name']}"
     )
 
     ssm_agent_container = task_definition.add_container(
