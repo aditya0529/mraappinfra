@@ -14,54 +14,11 @@ Parameters:
     Type: String
     Default: 'true'
     Description: Tag value to filter ECS services
+  LambdaRoleArn:
+    Type: String
+    Description: ARN of an existing IAM Role that the Lambda and SSM Automation should assume
 
 Resources:
-
-  SSMRunbookLambdaRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub ssm-runbook-generator-role-${AWS::StackName}
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - lambda.amazonaws.com
-                - ssm.amazonaws.com        # Allow SSM Automation to assume this role too
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: LambdaAutomationPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              # ECS discovery permissions
-              - Effect: Allow
-                Action:
-                  - ecs:ListClusters
-                  - ecs:ListServices
-                  - ecs:ListTasks
-                  - ecs:DescribeTasks
-                  - ecs:ListTagsForResource
-                  - resourcegroupstaggingapi:GetResources
-                Resource: '*'
-              # SSM doc create/update permissions
-              - Effect: Allow
-                Action:
-                  - ssm:CreateDocument
-                  - ssm:UpdateDocument
-                  - ssm:ListDocumentVersions
-                  - ssm:UpdateDocumentDefaultVersion
-                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:document/SSM-ECS-*
-              # SSM Automation execution permissions
-              - Effect: Allow
-                Action:
-                  - ssm:StartAutomationExecution
-                  - ssm:DescribeAutomationExecutions
-                  - ssm:GetAutomationExecution
-                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/SSM-ECS-*
 
   SSMRunbookGeneratorFunction:
     Type: AWS::Lambda::Function
@@ -69,13 +26,13 @@ Resources:
       FunctionName: !Sub ssm-runbook-generator-${AWS::StackName}
       Runtime: python3.11
       Handler: index.handler
-      Role: !GetAtt SSMRunbookLambdaRole.Arn
+      Role: !Ref LambdaRoleArn
       Timeout: 300
       Environment:
         Variables:
-          SSM_TAG_KEY:      !Ref SSMTagKey
-          SSM_TAG_VALUE:    !Ref SSMTagValue
-          LAMBDA_ROLE_ARN:  !GetAtt SSMRunbookLambdaRole.Arn
+          SSM_TAG_KEY:   !Ref SSMTagKey
+          SSM_TAG_VALUE: !Ref SSMTagValue
+          LAMBDA_ROLE_ARN: !Ref LambdaRoleArn
       Code:
         ZipFile: |
           import os, json, logging
