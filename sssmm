@@ -1,24 +1,79 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: |
-  A Lambda (on-demand) that regenerates two SSM Automation documents per ECS cluster:
-   • Stop All Tasks in all services
-   • Select & Stop a single task via dropdowns  
-  Both the Lambda itself and each Automation document’s steps will assume the **same** IAM role.
+  Creates a Lambda function that generates SSM Automation Documents for ECS:
+    - Stop all tasks in all tagged services
+    - Stop a selected ECS service
+    - Stop a specific ECS task
 
 Parameters:
+  ClusterName:
+    Type: String
+    Description: ECS Cluster to target
+
   SSMTagKey:
     Type: String
     Default: SSMRunbook
     Description: Tag key to filter ECS services
+
   SSMTagValue:
     Type: String
     Default: 'true'
     Description: Tag value to filter ECS services
-  LambdaRoleArn:
-    Type: String
-    Description: ARN of an existing IAM Role that the Lambda and SSM Automation should assume
 
 Resources:
+
+  RunbookGeneratorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ssm-runbook-generator-role-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RunbookGeneratorPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:ListServices
+                  - ecs:ListTasks
+                  - ecs:ListTagsForResource
+                  - ecs:UpdateService
+                  - ssm:CreateDocument
+                  - ssm:UpdateDocument
+                Resource: '*'
+
+  SSMAutomationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ssm-automation-execution-role-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SSMAutomationEcsPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:ListServices
+                  - ecs:ListTasks
+                  - ecs:DescribeTasks
+                  - ecs:DescribeServices
+                  - ecs:StopTask
+                Resource: '*'
 
   SSMRunbookGeneratorFunction:
     Type: AWS::Lambda::Function
@@ -26,144 +81,165 @@ Resources:
       FunctionName: !Sub ssm-runbook-generator-${AWS::StackName}
       Runtime: python3.11
       Handler: index.handler
-      Role: !Ref LambdaRoleArn
+      Role: !GetAtt RunbookGeneratorLambdaRole.Arn
       Timeout: 300
       Environment:
         Variables:
-          SSM_TAG_KEY:   !Ref SSMTagKey
-          SSM_TAG_VALUE: !Ref SSMTagValue
-          LAMBDA_ROLE_ARN: !Ref LambdaRoleArn
+          CLUSTER: !Ref ClusterName
+          TAG_KEY: !Ref SSMTagKey
+          TAG_VALUE: !Ref SSMTagValue
       Code:
         ZipFile: |
-          import os, json, logging
-          import boto3
-          from botocore.exceptions import ClientError
-
-          logger = logging.getLogger(__name__)
-          logger.setLevel(logging.INFO)
+          import os, json, boto3
 
           ecs = boto3.client('ecs')
           ssm = boto3.client('ssm')
 
-          TAG_KEY     = os.environ['SSM_TAG_KEY']
-          TAG_VALUE   = os.environ['SSM_TAG_VALUE']
-          ASSUME_ROLE = os.environ['LAMBDA_ROLE_ARN']
-          PREFIX_ALL  = 'SSM-ECS-StopAll'
-          PREFIX_SEL  = 'SSM-ECS-SelectStop'
+          CLUSTER = os.environ['CLUSTER']
+          TAG_KEY = os.environ['TAG_KEY']
+          TAG_VALUE = os.environ['TAG_VALUE']
 
-          def get_tagged_clusters_services():
-              out = {}
-              for page in ecs.get_paginator('list_clusters').paginate():
-                  for arn in page.get('clusterArns', []):
-                      cluster = arn.split('/')[-1]
-                      services = []
-                      for sp in ecs.get_paginator('list_services').paginate(cluster=cluster):
-                          services.extend(sp.get('serviceArns', []))
-                      tagged = [
-                          svc.split('/')[-1]
-                          for svc in services
-                          if any(
-                              t['key']==TAG_KEY and t['value']==TAG_VALUE
-                              for t in ecs.list_tags_for_resource(resourceArn=svc).get('tags', [])
-                          )
-                      ]
-                      if tagged:
-                          out[cluster] = sorted(tagged)
-              return out
+          def list_tagged_services():
+              arns = ecs.list_services(cluster=CLUSTER)['serviceArns']
+              result = []
+              for arn in arns:
+                  name = arn.rsplit('/', 1)[-1]
+                  tags = ecs.list_tags_for_resource(resourceArn=arn).get('tags', [])
+                  if any(t['key'] == TAG_KEY and t['value'] == TAG_VALUE for t in tags):
+                      result.append(name)
+              return result
 
-          def gather_tasks(cluster, services):
-              tasks = []
-              for svc in services:
-                  for tp in ecs.get_paginator('list_tasks').paginate(cluster=cluster, serviceName=svc):
-                      tasks.extend([arn.split('/')[-1] for arn in tp.get('taskArns', [])])
-              return sorted(set(tasks))
-
-          def build_doc_stop_all(cluster, tasks):
+          def doc_stop_all_tasks(service_list):
               return {
                   "schemaVersion": "0.3",
-                  "description": f"Stop ALL tasks in cluster {cluster}",
+                  "description": f"Stop all ECS tasks in each tagged service in cluster {CLUSTER}",
+                  "parameters": {
+                      "AutomationAssumeRole": {
+                          "type": "String",
+                          "description": "(Required) IAM role that SSM should assume to stop tasks"
+                      }
+                  },
+                  "assumeRole": "{{ AutomationAssumeRole }}",
                   "mainSteps": [
                       {
-                          "name": f"stop_{t}",
-                          "action": "aws:executeAwsApi",
+                          "name": "LoopServices",
+                          "action": "aws:loop",
                           "inputs": {
-                              "Service":    "ecs",
-                              "Api":        "stopTask",
-                              "Cluster":    cluster,
-                              "Task":       t,
-                              "AssumeRole": ASSUME_ROLE
+                              "Iterators": service_list,
+                              "IteratorDataType": "String",
+                              "Steps": [
+                                  {
+                                      "name": "ListTasks",
+                                      "action": "aws:executeAwsApi",
+                                      "inputs": {
+                                          "Service": "ecs",
+                                          "Api": "listTasks",
+                                          "cluster": CLUSTER,
+                                          "serviceName": "{{ LoopServices.CurrentIteratorValue }}"
+                                      },
+                                      "outputs": [
+                                          {
+                                              "Name": "TaskArns",
+                                              "Selector": "$.taskArns",
+                                              "Type": "StringList"
+                                          }
+                                      ]
+                                  },
+                                  {
+                                      "name": "StopTasks",
+                                      "action": "aws:executeScript",
+                                      "inputs": {
+                                          "Runtime": "python3.11",
+                                          "Handler": "stop_tasks",
+                                          "InputPayload": {
+                                              "cluster": CLUSTER,
+                                              "tasks": "{{ ListTasks.TaskArns }}"
+                                          },
+                                          "Script": (
+                                              "def stop_tasks(event, context):\n"
+                                              "  import boto3\n"
+                                              "  ecs = boto3.client('ecs')\n"
+                                              "  for task in event['tasks']:\n"
+                                              "    ecs.stop_task(cluster=event['cluster'], task=task)\n"
+                                              "  return {'stopped': len(event['tasks'])}"
+                                          )
+                                      }
+                                  }
+                              ]
                           }
-                      } for t in tasks
+                      }
                   ]
               }
 
-          def build_doc_select_stop(cluster, services, tasks):
+          def doc_stop_one_service(service_list):
               return {
                   "schemaVersion": "0.3",
-                  "description": f"Select & Stop a task in cluster {cluster}",
+                  "description": f"Set desiredCount=0 for a chosen service in {CLUSTER}",
                   "parameters": {
-                      "Cluster": {"type":"String","default":cluster,"allowedValues":[cluster]},
-                      "Service": {"type":"String","allowedValues":services},
-                      "Task":    {"type":"String","allowedValues":tasks}
-                  },
-                  "mainSteps": [{
-                      "name": "stopTask",
-                      "action": "aws:executeAwsApi",
-                      "inputs": {
-                          "Service":    "ecs",
-                          "Api":        "stopTask",
-                          "Cluster":    "{{ Cluster }}",
-                          "Task":       "{{ Task }}",
-                          "AssumeRole": ASSUME_ROLE
+                      "ServiceName": {
+                          "type": "String",
+                          "description": "ECS service to stop",
+                          "allowedValues": service_list
                       }
-                  }]
+                  },
+                  "mainSteps": [
+                      {
+                          "name": "StopService",
+                          "action": "aws:executeAwsApi",
+                          "inputs": {
+                              "Service": "ecs",
+                              "Api": "updateService",
+                              "cluster": CLUSTER,
+                              "service": "{{ ServiceName }}",
+                              "desiredCount": 0
+                          }
+                      }
+                  ]
               }
 
-          def upsert_doc(name, content):
-              payload = json.dumps(content)
+          def doc_stop_one_task():
+              return {
+                  "schemaVersion": "0.3",
+                  "description": f"Stop a given ECS task on cluster {CLUSTER}",
+                  "parameters": {
+                      "TaskArn": {
+                          "type": "String",
+                          "description": "ARN of the ECS task to stop"
+                      }
+                  },
+                  "mainSteps": [
+                      {
+                          "name": "StopTask",
+                          "action": "aws:executeAwsApi",
+                          "inputs": {
+                              "Service": "ecs",
+                              "Api": "stopTask",
+                              "cluster": CLUSTER,
+                              "task": "{{ TaskArn }}"
+                          }
+                      }
+                  ]
+              }
+
+          def upsert(name, body):
               try:
                   ssm.create_document(
-                    Name=name,
-                    Content=payload,
-                    DocumentType='Automation',
-                    DocumentFormat='JSON'
+                      Name=name,
+                      DocumentType='Automation',
+                      DocumentFormat='JSON',
+                      Content=json.dumps(body)
                   )
-                  logger.info(f"Created {name}")
               except ssm.exceptions.DocumentAlreadyExists:
-                  try:
-                      ssm.update_document(
-                        Name=name,
-                        Content=payload,
-                        DocumentFormat='JSON'
-                      )
-                      logger.info(f"Updated {name}")
-                  except ClientError as e:
-                      if e.response['Error']['Code']=='DuplicateDocumentContent':
-                          logger.info(f"No changes for {name}")
-                      else:
-                          logger.error(f"Failed updating {name}", exc_info=True)
-                          raise
+                  ssm.update_document(
+                      Name=name,
+                      DocumentVersion='$LATEST',
+                      DocumentFormat='JSON',
+                      Content=json.dumps(body)
+                  )
 
           def handler(event, context):
-              logger.info("Generating ECS runbooks...")
-              cs = get_tagged_clusters_services()
-              for cluster, svcs in cs.items():
-                  tasks = gather_tasks(cluster, svcs)
-
-                  # 1) Stop-All document
-                  name_all = f"{PREFIX_ALL}-{cluster}"
-                  doc_all  = build_doc_stop_all(cluster, tasks)
-                  upsert_doc(name_all, doc_all)
-
-                  # 2) Select-&-Stop document
-                  name_sel = f"{PREFIX_SEL}-{cluster}"
-                  doc_sel  = build_doc_select_stop(cluster, svcs, tasks)
-                  upsert_doc(name_sel, doc_sel)
-
-              logger.info("Done")
-              return {"status":"completed"}
-
-Outputs:
-  LambdaArn:
-    Description: ARN of the runbook-generator Lambda function
-    Value: !GetAtt SSMRunbookGeneratorFunction.Arn
+              services = list_tagged_services()
+              upsert(f'SSM-ECS-StopAllTasks-{CLUSTER}', doc_stop_all_tasks(services))
+              upsert(f'SSM-ECS-StopService-{CLUSTER}', doc_stop_one_service(services))
+              upsert(f'SSM-ECS-StopTask-{CLUSTER}', doc_stop_one_task())
+              return {"status": "SSM documents created/updated"}
