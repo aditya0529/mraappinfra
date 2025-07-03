@@ -4,6 +4,7 @@ Description: |
     - Stop all tasks in all tagged services
     - Stop a selected ECS service
     - Stop a specific ECS task
+    - Start a selected ECS service
 
 Parameters:
   ClusterName:
@@ -73,6 +74,7 @@ Resources:
                   - ecs:DescribeTasks
                   - ecs:DescribeServices
                   - ecs:StopTask
+                  - ecs:UpdateService
                 Resource: '*'
 
   SSMRunbookGeneratorFunction:
@@ -221,6 +223,37 @@ Resources:
                   ]
               }
 
+          def doc_start_one_service(service_list):
+              return {
+                  "schemaVersion": "0.3",
+                  "description": f"Start a chosen ECS service on cluster {CLUSTER} by setting desiredCount > 0",
+                  "parameters": {
+                      "ServiceName": {
+                          "type": "String",
+                          "description": "ECS service to start",
+                          "allowedValues": service_list
+                      },
+                      "DesiredCount": {
+                          "type": "Integer",
+                          "description": "Number of tasks to run",
+                          "default": 2
+                      }
+                  },
+                  "mainSteps": [
+                      {
+                          "name": "StartService",
+                          "action": "aws:executeAwsApi",
+                          "inputs": {
+                              "Service": "ecs",
+                              "Api": "updateService",
+                              "cluster": CLUSTER,
+                              "service": "{{ ServiceName }}",
+                              "desiredCount": "{{ DesiredCount }}"
+                          }
+                      }
+                  ]
+              }
+
           def upsert(name, body):
               try:
                   ssm.create_document(
@@ -242,4 +275,5 @@ Resources:
               upsert(f'SSM-ECS-StopAllTasks-{CLUSTER}', doc_stop_all_tasks(services))
               upsert(f'SSM-ECS-StopService-{CLUSTER}', doc_stop_one_service(services))
               upsert(f'SSM-ECS-StopTask-{CLUSTER}', doc_stop_one_task())
+              upsert(f'SSM-ECS-StartService-{CLUSTER}', doc_start_one_service(services))
               return {"status": "SSM documents created/updated"}
