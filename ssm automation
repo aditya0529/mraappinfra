@@ -1,0 +1,30 @@
+This pattern automates stop/start operations on your ECS services by decoupling runbook generation from execution:
+
+Triggering the Pipeline
+
+On-demand: A user manually kicks off the workflow.
+
+Event-driven: An EventBridge rule detects when a new ECS service is tagged (e.g. with a “ManageViaSSM” tag) and fires.
+
+Runbook Generation
+
+EventBridge invokes a Lambda (ECS Automation) function.
+
+The Lambda reads your tag/configuration, then creates or updates one or more AWS Systems Manager Automation Documents (runbooks) that encapsulate the ECS API calls needed to stop or start tasks.
+
+Automation Execution
+
+Operators (or additional automation) execute these SSM runbooks—either via the console, CLI, or as part of a multi-account/region SSM Automation.
+
+The runbook’s steps call into ECS APIs to stop or start tasks on the specified services within your ECS Cluster.
+
+Key Benefits
+
+Dynamic Runbooks: New services automatically get a tailored stop/start document whenever they’re tagged or when you redeploy.
+
+Separation of Concerns: Runbook creation (Lambda) is distinct from runbook execution (SSM), making it easy to audit, version, and grant least-privilege.
+
+Scalable & Repeatable: You can trigger automations across accounts and regions via SSM’s multi-account Automation features.
+
+Auditable: All SSM executions are logged in AWS CloudTrail and visible in the Systems Manager console.
+
